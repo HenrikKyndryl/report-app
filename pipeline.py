@@ -73,6 +73,12 @@ index_service = aiplatform_v1.IndexServiceClient(
 index_endpoint = MatchingEngineIndexEndpoint(INDEX_ENDPOINT_RESOURCE_NAME)
 
 
+# ---- Add near the top of pipeline.py ----
+class OCRRequired(Exception):
+    """Raised when the PDF requires OCR (image-only pages)."""
+    pass
+
+
 # --- CVR SEARCH ---
 ALLOWED_FORMS = {"A/S", "APS"}  # only these legal forms
 
@@ -141,101 +147,134 @@ def hent_aarsrapport(cvr_nummer):
 
 
 # --- OCR PDF TO TXT ---
-def pdf_to_text(local_pdf_path, gcs_txt_path, min_text_length=50):
+# ---- Add (web-safe) OCR check version; do NOT sys.exit here ----
+def pdf_to_text_websafe(local_pdf_path, gcs_txt_path, min_text_length=50):
     """
-    Extracts text from a PDF using native text only.
-    If any page requires OCR, exit early with a message.
-    Always returns gcs_txt_path.
+    Same as pdf_to_text, but raises OCRRequired instead of exiting the process.
+    Returns gcs_txt_path on success.
     """
-    # print(f"📄 Extracting text (no OCR) from {local_pdf_path} ...")
-
     pages_text = []
     with fitz.open(local_pdf_path) as doc:
         for page_num, page in enumerate(doc, start=1):
             page_text = page.get_text("text") or ""
-
             if len(page_text.strip()) < min_text_length:
-                print("❌ This document demands OCR scanning")
-                #return gcs_txt_path  # exit early, do NOT upload
-                sys.exit(0)  # 🚪 exit application with error code
-
-            #print(f"✅ Extracted text directly from page {page_num}")
+                raise OCRRequired(f"Dette pdf dokument kræver OCR scanning (side {page_num})")
             pages_text.append(page_text.strip())
 
     full_text = "\n\n".join(pages_text)
-
     bucket_name, blob_name = gcs_txt_path.replace("gs://", "").split("/", 1)
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
-
-    # 🔑 ensure UTF-8 upload
     blob.upload_from_string(full_text.encode("utf-8"), content_type="text/plain; charset=utf-8")
 
-    # Optional sanity check
     if not blob.exists():
         raise RuntimeError(f"❌ Upload failed: {gcs_txt_path} not found in GCS!")
 
-    # print(f"✅ TXT uploaded til: {gcs_txt_path} (length {len(full_text)} chars)")
     return gcs_txt_path
 
 
+
 # --- INDEXING ---
-def index_txt(gcs_txt_path):
+# ---- Update indexing to be per-company and non-destructive ----
+def index_txt_for_company(gcs_txt_path, cvr_nummer):
+    """
+    Download TXT from GCS, split to chunks, embed and upsert into Matching Engine.
+    Firestore docs are tagged with the CVR so we can filter at query time.
+    Old docs for *this CVR* are removed before re-indexing.
+    """
     bucket_name, blob_name = gcs_txt_path.replace("gs://", "").split("/", 1)
     text = storage_client.bucket(bucket_name).blob(blob_name).download_as_text()
     docs = [c.strip() for c in text.split("\n\n") if c.strip()]
-    # print(f"✂️ Splitting into {len(docs)} chunks...")
 
-    # Clear old docs in Firestore
+    # Remove old docs for this CVR only
     old_ids = []
-    for doc in firestore_client.collection(FIRESTORE_COLLECTION).stream():
-        old_ids.append(doc.id)
-        doc.reference.delete()
+    for d in firestore_client.collection(FIRESTORE_COLLECTION).where("cvr", "==", cvr_nummer).stream():
+        old_ids.append(d.id)
+        d.reference.delete()
 
-    # print(f"🧹 Cleared {len(old_ids)} old docs from Firestore.")
-
-    # Clear old datapoints in Matching Engine (optional, will fail gracefully if none exist)
     if old_ids:
         try:
             index_service.remove_datapoints(
                 request=aiplatform_v1.RemoveDatapointsRequest(
-                    index=f"projects/{PROJECT_NO_ID}/locations/{LOCATION}/indexes/{INDEX_ID}",
+                    index=INDEX_RESOURCE,
                     datapoint_ids=old_ids
                 )
             )
-            # print(f"🧹 Cleared {len(old_ids)} old datapoints from Matching Engine.")
         except Exception as e:
-            print(f"⚠️ Could not clear old datapoints: {e}")
+            print(f"⚠️ Could not clear old datapoints for {cvr_nummer}: {e}")
 
     # Index new docs
     datapoints = []
     for chunk in docs:
-        doc_id = str(uuid.uuid4())   # unique ID shared between Firestore + Matching Engine
+        doc_id = str(uuid.uuid4())
         emb = embedding_model.get_embeddings([chunk])[0]
 
-        # Save to Firestore
+        # Save to Firestore with CVR tag
         firestore_client.collection(FIRESTORE_COLLECTION).document(doc_id).set(
-            {"text": chunk, "source": gcs_txt_path}
+            {"text": chunk, "source": gcs_txt_path, "cvr": cvr_nummer}
         )
 
-        # Add to datapoints for Matching Engine
         datapoints.append(
             aiplatform_v1.IndexDatapoint(
                 datapoint_id=doc_id,
                 feature_vector=emb.values
             )
         )
-        # print(f"   → Saved Firestore+Index doc {doc_id[:8]}... "
-        #      f"({len(chunk)} chars, embedding={len(emb.values)})")
 
-    # Push datapoints to Matching Engine (using IndexServiceClient)
     if datapoints:
-        req = aiplatform_v1.UpsertDatapointsRequest(
-            index=INDEX_RESOURCE,
-            datapoints=datapoints
-        )
+        req = aiplatform_v1.UpsertDatapointsRequest(index=INDEX_RESOURCE, datapoints=datapoints)
         index_service.upsert_datapoints(request=req)
-        # print(f"✅ Uploaded {len(datapoints)} datapoints to Matching Engine")
+
+
+# ---- Add a web-friendly Q&A helper that filters by CVR ----
+def answer_question(cvr_nummer: str, question: str) -> str:
+    """
+    Embed the question, query Matching Engine, then keep only contexts whose Firestore doc has this CVR.
+    Ask Gemini and return the text.
+    """
+    # 1) Embed question
+    q_emb = embedding_model.get_embeddings([question])[0]
+
+    # 2) Neighbors
+    response = index_endpoint.find_neighbors(
+        deployed_index_id=DEPLOYED_INDEX_ID,
+        queries=[q_emb.values],
+        num_neighbors=25
+    )
+
+    # 3) Collect contexts for this CVR only
+    contexts = []
+    for neighbor in response[0]:
+        nn_id = neighbor.id
+        doc = firestore_client.collection(FIRESTORE_COLLECTION).document(nn_id).get()
+        if doc.exists and doc.get("cvr") == cvr_nummer:
+            contexts.append(doc.get("text"))
+        if len(contexts) >= 5:
+            break
+
+    context_text = "\n---\n".join(contexts) if contexts else "(ingen relevante uddrag fundet)"
+
+    # 4) Ask Gemini (HTTP call like in your script)
+    headers = {"Content-Type": "application/json", "x-goog-api-key": API_KEY}
+    body = {
+        "contents": [{"role": "user", "parts": [{"text": f"Brug kun denne kontekst:\n{context_text}\n\nSpørgsmål: {question}\nSvar på dansk."}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 256},
+    }
+    url = f"https://generativelanguage.googleapis.com/v1/{PRIMARY_MODEL}:generateContent"
+
+    r = requests.post(url, headers=headers, data=json.dumps(body))
+    if r.status_code != 200:
+        return f"⚠️ LLM error: {r.text}"
+
+    data = r.json()
+    return (
+        data.get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [{}])[0]
+        .get("text", "")
+        or "(intet svar)"
+    )
+
 
 
 # --- Q&A LOOP ---

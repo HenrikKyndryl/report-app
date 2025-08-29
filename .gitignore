@@ -1,0 +1,26 @@
+# Python caches / virtualenvs
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage / build artifacts
+.coverage
+coverage.xml
+build/
+dist/
+pip-wheel-metadata/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+.python-version
+
+# Env files (keep secrets out of git)
+.env
+.env.*

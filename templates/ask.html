@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head><title>Ask a Question</title></head>
+<body>
+  <img src="/static/kyndryl.png" alt="Kyndryl" style="height:60px;">
+  <h1>Ask about {{ company.name }} (CVR: {{ company.cvr }})</h1>
+  <form action="/ask" method="post">
+    <input type="hidden" name="cvr" value="{{ company.cvr }}">
+    <input type="text" name="question" placeholder="Type your question here" style="width:420px;">
+    <button type="submit">Ask</button>
+  </form>
+  <p><a href="/">🔎 Search another company</a></p>
+</body>
+</html>

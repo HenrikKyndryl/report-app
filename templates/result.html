@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head><title>Answer</title></head>
+<body>
+  <img src="/static/kyndryl.png" alt="Kyndryl" style="height:60px;">
+  <h1>Answer for {{ company.name }} (CVR: {{ company.cvr }})</h1>
+
+  <h3>Question</h3>
+  <p>{{ question }}</p>
+
+  <h3>Answer</h3>
+  <p>{{ answer }}</p>
+
+  <hr>
+  <h3>Next steps</h3>
+  <ul>
+    <li><a href="/choose/{{ company.cvr }}">Ask a new question about {{ company.name }}</a></li>
+    <li><a href="/">Search for a new company</a></li>
+  </ul>
+</body>
+</html>
+
+

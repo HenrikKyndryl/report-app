@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head><title>Select Company</title></head>
+<body>
+  <img src="/static/kyndryl.png" alt="Kyndryl" style="height:60px;">
+  <h1>Results for “{{ query }}”</h1>
+  {% if companies %}
+    <ul>
+      {% for c in companies %}
+        <li>
+          <a href="/choose/{{ c.cvr }}">{{ c.name }} (CVR: {{ c.cvr }}) – {{ c.form }}</a>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No matches.</p>
+  {% endif %}
+  <p><a href="/">🔙 New search</a></p>
+</body>
+</html>
+
