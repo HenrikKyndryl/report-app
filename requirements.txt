@@ -1,0 +1,13 @@
+
+fastapi
+uvicorn[standard]
+jinja2
+google-cloud-storage
+google-cloud-firestore
+google-cloud-aiplatform
+requests
+pymupdf
+pytesseract
+pillow
+langdetect
+

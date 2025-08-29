@@ -1,0 +1,17 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Resultat</title>
+</head>
+<body>
+  {% if error %}
+    <h2 style="color:red;">Fejl: {{ error }}</h2>
+  {% else %}
+    <h2>✅ Rapport behandlet for {{ name }} (CVR: {{ cvr }})</h2>
+    <p>Rapporten er uploadet og indekseret. Klar til Q&A via Gemini.</p>
+  {% endif %}
+  <a href="/">🔙 Tilbage</a>
+</body>
+</html>
+
